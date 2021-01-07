@@ -15,7 +15,8 @@ mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true 
   .then(() => {
 	console.log('connected to MongoDB')
 	// const author = new Author({
-	// 	name: 'Joshua Kerievsky',
+	// 	name: 'Fyodor Dostoevsky',
+	// 	born: 1821
 	//   })
 
 	// await author.save()
@@ -103,9 +104,10 @@ const resolvers = {
         // if (!args.author && !args.genre) {}
 			try {
 				const books = await Book.find()
-				return books.map(book => ({
-				  ...book._doc,
-				  author: authorPopulated.bind(this, book._doc.author)
+				const filtedBooksByGenre = !args.genre? books: books.filter(b => b.genres.includes(args.genre))
+				return filtedBooksByGenre.map(book => ({
+					...book._doc,
+					author: authorPopulated.bind(this, book._doc.author)
 				}))
 			  } catch (error) {
 				throw new UserInputError(error.message, {
@@ -115,6 +117,9 @@ const resolvers = {
 
 	  },
 	  allAuthors: () => Author.find({}),
+	  me: (root, args, context) => {
+		 return context.currentUser
+	  }
   },
   Author: {
 	bookCount: async (root) => {
@@ -124,7 +129,7 @@ const resolvers = {
 	}
   },
   Mutation: {
-    addBook: async (root,args, context) => {
+    addBook: async (root, args, context) => {
 	  const book = new Book({ ...args })
 	  const currentUser = context.currentUser
 
@@ -200,7 +205,7 @@ const server = new ApolloServer({
 	  const decodedToken = jwt.verify(
 		auth.substring(7), JWT_SECRET
 	  )
-	  const currentUser = await User.findById(decodedToken.id).populate('friends')
+	  const currentUser = await User.findById(decodedToken.id)
 	  return { currentUser }
 	}
   }
