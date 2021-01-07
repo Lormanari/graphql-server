@@ -4,6 +4,10 @@ const mongoose = require('mongoose')
 const Author = require('./models/author')
 const Book = require('./models/book')
 const User = require('./models/user')
+const DataLoader = require('dataloader')
+
+const { PubSub } = require('apollo-server')
+const pubsub = new PubSub()
 
 mongoose.set('useFindAndModify', false)
 const MONGODB_URI = 'mongodb+srv://fullstack:F1LpjDv7iNvMF2si@cluster0.emxpr.mongodb.net/graphql-book?retryWrites=true&w=majority'
@@ -56,6 +60,10 @@ const typeDefs = gql`
 	value: String!
   }
 
+  type Subscription {
+	bookAdded: Book!
+  }
+
   type Query {
 	bookCount: Int!
 	authorCount: Int!
@@ -86,34 +94,27 @@ const typeDefs = gql`
   }
 `
 
-const authorPopulated = async authorId => {
-	try {
-		return await Author.findById(authorId)
-	} catch (err) {
-		throw new UserInputError(error.message, {
-			invalidArgs: authorId,
-		})
-	}
-  }
-
 const resolvers = {
   Query: {
 	  bookCount: () => Book.collection.countDocuments(),
 	  authorCount: () => Author.collection.countDocuments(),
 	  allBooks: async (root, args) => {
-        // if (!args.author && !args.genre) {}
-			try {
-				const books = await Book.find()
-				const filtedBooksByGenre = !args.genre? books: books.filter(b => b.genres.includes(args.genre))
-				return filtedBooksByGenre.map(book => ({
-					...book._doc,
-					author: authorPopulated.bind(this, book._doc.author)
-				}))
-			  } catch (error) {
-				throw new UserInputError(error.message, {
-				  invalidArgs: args,
-				})
-			  }
+		try {
+			// const books = await Book.find()
+			// const filtedBooksByGenre = !args.genre? books: books.filter(b => b.genres.includes(args.genre))
+			// return filtedBooksByGenre.map(book => ({
+			// 	...book._doc,
+			// 	author: authorPopulated.bind(this, book._doc.author)
+			// }))
+			if(!args.genre) {
+				return Book.find({}).populate('author')
+			}
+			return Book.find({genres: {$in: [args.genre]}}).populate('author')
+			} catch (error) {
+			throw new UserInputError(error.message, {
+				invalidArgs: args,
+			})
+			}
 
 	  },
 	  allAuthors: () => Author.find({}),
@@ -122,10 +123,8 @@ const resolvers = {
 	  }
   },
   Author: {
-	bookCount: async (root) => {
-		const booksWrittenByAuthor = await Book.find({author: {$in: [root._id]}})
-		const booksLength = booksWrittenByAuthor.length ? booksWrittenByAuthor.length : 0
-		return booksLength
+	bookCount: (root, args, context) => {
+		return context.bookCountLoader.load(root._id);
 	}
   },
   Mutation: {
@@ -139,17 +138,17 @@ const resolvers = {
 
 	  try {
 		const savedBook = await book.save()
-		const authorRecord = await Author.findById(args.author)
-		await authorRecord.save()
-		return {
-			...savedBook._doc,
-			author: authorPopulated.bind(this, args.author)
-		}
+		const populatedBook = savedBook.populate('author').execPopulate()
+		pubsub.publish('BOOK_ADDED', { bookAdded: populatedBook })
+		console.log(populatedBook)
+		return populatedBook
+
       } catch (error) {
         throw new UserInputError(error.message, {
           invalidArgs: args,
-        })
+		})
 	  }
+
 	},
 	editAuthor: async (root, args, context) => {
 		const author = await Author.findOne({ name:args.name })
@@ -193,8 +192,22 @@ const resolvers = {
 
 		return { value: jwt.sign(userForToken, JWT_SECRET) }
 	},
-  }
+  },
+  Subscription: {
+    bookAdded: {
+      subscribe: () => pubsub.asyncIterator(['BOOK_ADDED'])
+    },
+  },
 }
+
+const bookCountLoader = new DataLoader(async (authorIds) => {
+	const books = await Book.find({ author: { $in: authorIds }})
+    return authorIds.map((id) => {
+		const booksByAuthor = books.filter(b => String(b.author) === String(id))
+		const booksLength = booksByAuthor.length || 0
+		return booksLength
+	});
+});
 
 const server = new ApolloServer({
   typeDefs,
@@ -206,11 +219,17 @@ const server = new ApolloServer({
 		auth.substring(7), JWT_SECRET
 	  )
 	  const currentUser = await User.findById(decodedToken.id)
-	  return { currentUser }
+	  return {
+		  currentUser,
+		  bookCountLoader
+	  }
+	} else {
+		return {bookCountLoader}
 	}
   }
 })
 
-server.listen().then(({ url }) => {
+server.listen().then(({ url, subscriptionsUrl }) => {
   console.log(`Server ready at ${url}`)
+  console.log(`Subscriptions ready at ${subscriptionsUrl}`)
 })
